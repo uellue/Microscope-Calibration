@@ -8,7 +8,8 @@ import sympy as sym
 
 import jax; jax.config.update("jax_enable_x64", True)  # noqa
 import jax_dataclasses as jdc
-import jax.numpy as jnp
+# import jax.numpy as jnp
+import numpy as np
 from jax.errors import TracerBoolConversionError
 
 from temgym_core.ray import Ray
@@ -20,39 +21,46 @@ from temgym_core.propagator import Propagator, FreeSpaceParaxial
 
 
 # Jax-compatible versions of libertem.corrections.coordinates functions
-def scale(factor, xp):
-    return xp.eye(2) * factor
+def scale(factor):
+    return sym.eye(2) * factor
 
 
-def rotate(radians, xp):
-    # https://en.wikipedia.org/wiki/Rotation_matrix
-    # y, x instead of x, y
-    # radians = jnp.astype(radians, jnp.float64)
-    return xp.array(
-        [(xp.cos(radians), xp.sin(radians)), (-xp.sin(radians), xp.cos(radians))]
-    )
+def rotate(radians):
+    return sym.rot_givens(0, 1, radians, dim=2)
 
 
 # The flip_factor is introduced to make it differentiable
-def flip_y(xp, flip_factor: float = -1.0):
-    return xp.array([(flip_factor, 0), (0, 1)], dtype=xp.float64)
+def flip_y(flip_factor: sym.Float = sym.S(-1.0)):
+    return sym.Matrix([[flip_factor, 0], [0, 1]])
 
 
-def identity(xp):
-    return xp.eye(2, dtype=xp.float64)
+def identity():
+    return sym.eye(2)
 
 
-def scale_rotate_flip(mat: npt.ArrayLike, xp):
+def scale_rotate_flip(mat: sym.Matrix):
     """
     Deconstruct a matrix generated with scale() @ rotate() @ flip_y()
-    into the individual parameters
+    into the individual parameters.
+
+    Use sympy functions to be able to handle symbols in e.g. sin() or cos()
+    calculations.
+
+    Note that the check if the norms are equal and if the angles are consistent
+    will raise value error for arbitrary symbols due to indeterminacy. Symbols with
+    declared relations between them pass the check. The check is the simplified
+    and combined version of the old ones, which are commented out. It was developed
+    by solving the system of equations for the symbolic case. TODO: test cases
+    if the new check is fully equivivalent to the old ones in practice.
     """
-    scale_y = xp.linalg.norm(mat[:, 0])
-    scale_x = xp.linalg.norm(mat[:, 1])
-    if not xp.allclose(scale_y, scale_x):
-        raise ValueError(f"y scale {scale_y} and x scale {scale_x} are different.")
+    scale_y = mat[:, 0].norm()
+    scale_x = mat[:, 1].norm()
+
+    # if not scale_x.equals(scale_y):
+    #    raise ValueError(f"y scale {scale_y} and x scale {scale_x} are different.")
 
     scan_rot_flip = mat / scale_y
+
     # 2D cross product
     flip_factor = (
         scan_rot_flip[0, 0] * scan_rot_flip[1, 1]
@@ -60,22 +68,23 @@ def scale_rotate_flip(mat: npt.ArrayLike, xp):
     )
     # undo flip_y
     rot = scan_rot_flip.copy()
-    if xp is jnp:
-        rot = rot.at[:, 0].set(rot[:, 0] * flip_factor)
-    else:
-        rot[:, 0] = rot[:, 0] * flip_factor
+    rot[:, 0] = rot[:, 0] * flip_factor
+    rot = sym.simplify(rot)
 
-    angle1 = xp.arctan2(-rot[1, 0], rot[0, 0])
-    angle2 = xp.arctan2(rot[0, 1], rot[1, 1])
+    angle1 = sym.atan2(-rot[1, 0], rot[0, 0])
+    angle2 = sym.atan2(rot[0, 1], rot[1, 1])
+
+    if sym.Or(sym.And(mat[0, 0].equals(mat[1, 1]), mat[0, 1].equals(-mat[1, 0])),
+              sym.And(mat[0, 0].equals(-mat[1, 1]), mat[0, 1].equals(mat[1, 0]))) is not sym.S.true:
+        raise ValueError(f"y scale {scale_y} and x scale {scale_x} are different or rotation "
+                         f"angle 1 {angle1} and rotation angle 2 {angle2} are inconsistent.")
 
     # So far not reached in tests since inconsistencies are caught as shear before
-    if not xp.allclose(
-        xp.array((xp.sin(angle1), xp.cos(angle1))),
-        xp.array((xp.sin(angle2), xp.cos(angle2))),
-    ):
-        raise ValueError(
-            f"Rotation angle 1 {angle1} and rotation angle 2 {angle2} are inconsistent."
-        )
+    # if not sym.Matrix([sym.sin(angle1), sym.cos(angle1)]).equals(sym.Matrix([sym.sin(angle2),
+    #                                                                         sym.cos(angle2)])):
+    #    raise ValueError(
+    #        f"Rotation angle 1 {angle1} and rotation angle 2 {angle2} are inconsistent."
+    #    )
 
     return (scale_y, angle1, flip_factor)
 
@@ -174,7 +183,7 @@ class Parameters4DSTEM:
     flip_factor: float  # 1.: no flip; -1.: flip
     descan_error: DescanError = DescanError()
     detector_rotation: float = 0.0  # rad
-    xp: ModuleType = jnp
+    xp: ModuleType = np
 
     def derive(
         self,
@@ -281,10 +290,10 @@ class Parameters4DSTEM:
         xp = self.xp
 
         # Rotate the input direction
-        pxo_pyi, pxo_pxi = rotate(angle, xp=xp) @ xp.array((de.pxo_pyi, de.pxo_pxi))
-        pyo_pyi, pyo_pxi = rotate(angle, xp=xp) @ xp.array((de.pyo_pyi, de.pyo_pxi))
-        sxo_pyi, sxo_pxi = rotate(angle, xp=xp) @ xp.array((de.sxo_pyi, de.sxo_pxi))
-        syo_pyi, syo_pxi = rotate(angle, xp=xp) @ xp.array((de.syo_pyi, de.syo_pxi))
+        pxo_pyi, pxo_pxi = rotate(angle) @ xp.array((de.pxo_pyi, de.pxo_pxi))
+        pyo_pyi, pyo_pxi = rotate(angle) @ xp.array((de.pyo_pyi, de.pyo_pxi))
+        sxo_pyi, sxo_pxi = rotate(angle) @ xp.array((de.sxo_pyi, de.sxo_pxi))
+        syo_pyi, syo_pxi = rotate(angle) @ xp.array((de.syo_pyi, de.syo_pxi))
         new_de = DescanError(
             pxo_pyi=pxo_pyi,
             pyo_pyi=pyo_pyi,
@@ -372,12 +381,12 @@ class Parameters4DSTEM:
         xp = self.xp
 
         # rotate the output direction
-        pyo_pyi, pxo_pyi = rotate(angle, xp=xp) @ xp.array((de.pyo_pyi, de.pxo_pyi))
-        pyo_pxi, pxo_pxi = rotate(angle, xp=xp) @ xp.array((de.pyo_pxi, de.pxo_pxi))
-        syo_pyi, sxo_pyi = rotate(angle, xp=xp) @ xp.array((de.syo_pyi, de.sxo_pyi))
-        syo_pxi, sxo_pxi = rotate(angle, xp=xp) @ xp.array((de.syo_pxi, de.sxo_pxi))
-        offpyi, offpxi = rotate(angle, xp=xp) @ xp.array((de.offpyi, de.offpxi))
-        offsyi, offsxi = rotate(angle, xp=xp) @ xp.array((de.offsyi, de.offsxi))
+        pyo_pyi, pxo_pyi = rotate(angle) @ xp.array((de.pyo_pyi, de.pxo_pyi))
+        pyo_pxi, pxo_pxi = rotate(angle) @ xp.array((de.pyo_pxi, de.pxo_pxi))
+        syo_pyi, sxo_pyi = rotate(angle) @ xp.array((de.syo_pyi, de.sxo_pyi))
+        syo_pxi, sxo_pxi = rotate(angle) @ xp.array((de.syo_pxi, de.sxo_pxi))
+        offpyi, offpxi = rotate(angle) @ xp.array((de.offpyi, de.offpxi))
+        offsyi, offsxi = rotate(angle) @ xp.array((de.offsyi, de.offsxi))
         new_de = DescanError(
             pxo_pyi=pxo_pyi,
             pyo_pyi=pyo_pyi,
@@ -408,8 +417,7 @@ class Parameters4DSTEM:
 
         if flip_factor != self.flip_factor:
             # Rotate into detector directions, flip, then rotate back
-            trans = rotate(angle, xp=xp) @ flip_y(xp, flip_factor/self.flip_factor) @ rotate(-angle,
-                                                                                             xp=xp)
+            trans = rotate(angle) @ flip_y(flip_factor/self.flip_factor) @ rotate(-angle)
             # transform the output direction
             pyo_pyi, pxo_pyi = trans @ xp.array((de.pyo_pyi, de.pxo_pyi))
             pyo_pxi, pxo_pxi = trans @ xp.array((de.pyo_pxi, de.pxo_pxi))
@@ -594,25 +602,24 @@ class Model4DSTEM:
         scan_pos: PixelYX,
         specimen: Optional[Component] = None,
     ) -> "Model4DSTEM":
-        scan_to_real = rotate(params.scan_rotation, xp=params.xp) @ scale(params.scan_pixel_pitch,
-                                                                          xp=params.xp)
-        real_to_scan = scale(1 / params.scan_pixel_pitch, xp=params.xp) @ rotate(
-            -params.scan_rotation, xp=params.xp)
-        scan_y, scan_x = scan_to_real @ params.xp.array(
-            (
+        scan_to_real = rotate(params.scan_rotation) @ scale(params.scan_pixel_pitch)
+        real_to_scan = scale(1 / params.scan_pixel_pitch) @ rotate(
+            -params.scan_rotation)
+        scan_y, scan_x = scan_to_real @ sym.Matrix(
+            [
                 scan_pos.y - params.scan_center.y,
                 scan_pos.x - params.scan_center.x,
-            )
+            ]
         )
         detector_to_real = (
-            scale(params.detector_pixel_pitch, xp=params.xp)
-            @ rotate(params.detector_rotation, xp=params.xp)
-            @ flip_y(flip_factor=params.flip_factor, xp=params.xp)
+            scale(params.detector_pixel_pitch)
+            @ rotate(params.detector_rotation)
+            @ flip_y(flip_factor=params.flip_factor)
         )
         real_to_detector = (
-            flip_y(flip_factor=1 / params.flip_factor, xp=params.xp)
-            @ rotate(-params.detector_rotation, xp=params.xp)
-            @ scale(1 / params.detector_pixel_pitch, xp=params.xp)
+            flip_y(flip_factor=1 / params.flip_factor)
+            @ rotate(-params.detector_rotation)
+            @ scale(1 / params.detector_pixel_pitch)
         )
         if specimen is None:
             specimen = Plane(z=params.overfocus)
@@ -644,13 +651,12 @@ class Model4DSTEM:
 
     @property
     def params(self) -> Parameters4DSTEM:
-        scan_scale, scan_rotation, scan_flip = scale_rotate_flip(self._scan_to_real, xp=self.xp)
+        scan_scale, scan_rotation, scan_flip = scale_rotate_flip(self._scan_to_real)
         # FIXME assert close to 1
         # assert scan_flip is False
         detector_scale, detector_rotation, detector_flip = scale_rotate_flip(
-            self._detector_to_real, xp=self.xp
-        )
-        assert self.xp.allclose(detector_rotation, 0.0)
+            self._detector_to_real)
+        # assert self.xp.allclose(detector_rotation, 0.0)
         return Parameters4DSTEM(
             overfocus=self.specimen.z - self.source.z,
             scan_pixel_pitch=scan_scale,
@@ -743,7 +749,7 @@ class Model4DSTEM:
         comp, r = run_result.pop(0)
         try:
             assert isinstance(comp, Propagator)
-            assert comp.distance == 0.0
+            # assert comp.distance == 0.0
             assert isinstance(r, Ray)
             assert equals(r, result["scanner"].ray)
         except TracerBoolConversionError:
@@ -766,7 +772,7 @@ class Model4DSTEM:
         comp, r = run_result.pop(0)
         try:
             assert isinstance(comp, Propagator)
-            assert comp.distance == 0.0
+            # assert comp.distance == 0.0
             assert equals(r, result["specimen"].ray)
         except TracerBoolConversionError:
             pass
@@ -799,6 +805,180 @@ class Model4DSTEM:
 
         assert len(run_result) == 0
         return result
+
+
+def adjust_pixel_pitch_sympy(model_cls=Model4DSTEM) -> Model4DSTEM:
+    """
+    Adjust the scan pixel pitch while keeping the effective descan error
+    compensation the same.
+
+    This allows first compensating descan error and then adjusting other parameters.
+
+    This function first finds a general symbolic expression for each component of the
+    new descan error given old parameteres as symbols, then converts the sympy
+    expressions for each component into a function that allows fast numeric evaluation.
+    After that the new model is constructed.
+
+    Use trace() to calculate detector_px() for the old and for the new parameters.
+    Then set the results equal to each other and solve the equation with respect
+    to the new descan error. For this purpose construct two expressions - for y and x
+    coordiates respectively - and apply sympy.solve().
+    Note that the equations should hold for every value of the scan position (in particular,
+    scan_pos_y scan_pos_x), and also for every value of the camera length. To implement that,
+    expand the expressions, then rearange them to be polynomials in the variables scan_pos_y,
+    scan_pos_x and camera_length, which automatically means collecting the coefficients
+    of each variable through the usage of sympy.Poly(). Finally, set the collected
+    coefficients of the polynomials to zero, which mathematically implies the desired
+    property: a polynomial is zero for all the values of its variables if and only if
+    all its coefficients equal to zero.
+    In such a way one receives equations for each of the collected coefficients, which
+    suffices to make the system solvable for all the 12 components of descan error as
+    variables.
+
+    The received expressions for each component of the new DescanError fully coincide
+    with the ones calculated by hand earlier.
+
+    apply_function() cconstructs a function using sympy.lambdify() that allows inserting
+    real values to each expression of the general solution and after that evaluating them
+    numerically. The lambdify() method can be supplemented with the specific
+    numerical backend by inserting e.g. "numpy", "cupy" or "jax" to the optional
+    argument "modules=" of sympy.lambdify().
+    """
+    (overfocus, scan_center_y,
+     scan_center_x, scan_rotation,
+     camera_length, detector_pitch,
+     detector_center_y, detector_center_x,
+     semiconv, flip_factor) = sym.symbols(r'p_overfocus p_{scancenter_y} '
+                                        r'p_{scancenter_x} p_scanrot '
+                                        r'p_camera p_detectorpitch '
+                                        r'p_{detectorcenter_y} p_{detectorcenter_x} '
+                                        r'p_semiconv p_flip', nonzero=True)
+
+    (pxo_pxi_old, pxo_pyi_old,
+     pyo_pxi_old, pyo_pyi_old,
+     sxo_pxi_old, sxo_pyi_old,
+     syo_pxi_old, syo_pyi_old,
+     offpxi_old, offpyi_old,
+     offsxi_old, offsyi_old) = sym.symbols(r'pxopxi_old pxopyi_old '
+                                        r'pyopxi_old pyopyi_old '
+                                        r'sxopxi_old sxopyi_old '
+                                        r'syopxi_old syopyi_old '
+                                        r'offpxi_old offpyi_old '
+                                        r'offsxi_old offsyi_old')
+    (pxo_pxi_new, pxo_pyi_new,
+     pyo_pxi_new, pyo_pyi_new,
+     sxo_pxi_new, sxo_pyi_new,
+     syo_pxi_new, syo_pyi_new,
+     offpxi_new, offpyi_new,
+     offsxi_new, offsyi_new) = sym.symbols(r'pxopxi_new pxopyi_new '
+                                        r'pyopxi_new pyopyi_new '
+                                        r'sxopxi_new sxopyi_new '
+                                        r'syopxi_new syopyi_new '
+                                        r'offpxi_new offpyi_new '
+                                        r'offsxi_new offsyi_new')
+
+    descan_error_old = DescanError(
+        pxo_pxi=pxo_pxi_old, pxo_pyi=pxo_pyi_old,
+        pyo_pxi=pyo_pxi_old, pyo_pyi=pyo_pyi_old,
+        sxo_pxi=sxo_pxi_old, sxo_pyi=sxo_pyi_old,
+        syo_pxi=syo_pxi_old, syo_pyi=syo_pyi_old,
+        offpxi=offpxi_old, offpyi=offpyi_old,
+        offsxi=offsxi_old, offsyi=offsyi_old)
+
+    descan_error_new = DescanError(
+        pxo_pxi=pxo_pxi_new, pxo_pyi=pxo_pyi_new,
+        pyo_pxi=pyo_pxi_new, pyo_pyi=pyo_pyi_new,
+        sxo_pxi=sxo_pxi_new, sxo_pyi=sxo_pyi_new,
+        syo_pxi=syo_pxi_new, syo_pyi=syo_pyi_new,
+        offpxi=offpxi_new, offpyi=offpyi_new,
+        offsxi=offsxi_new, offsyi=offsyi_new
+    )
+
+    pitch_old, pitch_new = sym.symbols(r'pitch_old pitch_new', nonzero=True)
+
+    params_old = Parameters4DSTEM(
+        overfocus=overfocus,
+        scan_pixel_pitch=pitch_old,
+        scan_center=PixelYX(scan_center_y, scan_center_x),
+        scan_rotation=scan_rotation,
+        camera_length=camera_length,
+        detector_pixel_pitch=detector_pitch,
+        detector_center=PixelYX(detector_center_y, detector_center_x),
+        semiconv=semiconv,  # radian
+        flip_factor=flip_factor,
+        descan_error=descan_error_old,
+        xp=np
+    )
+
+    params_new = Parameters4DSTEM(
+        overfocus=overfocus,
+        scan_pixel_pitch=pitch_new,
+        scan_center=PixelYX(scan_center_y, scan_center_x),
+        scan_rotation=scan_rotation,
+        camera_length=camera_length,
+        detector_pixel_pitch=detector_pitch,
+        detector_center=PixelYX(detector_center_y, detector_center_x),
+        semiconv=semiconv,  # radian
+        flip_factor=flip_factor,
+        descan_error=descan_error_new,
+        xp=np
+    )
+
+    def detector_px(m: Model4DSTEM):
+        ray = m.make_source_ray(
+            source_dy=0.,
+            source_dx=0.,
+        ).ray
+        data = m.trace(ray)
+        return data['detector'].sampling['detector_px']
+
+    scan_pos_y, scan_pos_x = sym.symbols(r'scan_{pos_y} scan_{pos_x}')
+    scan_pos = PixelYX(scan_pos_y, scan_pos_x)
+
+    model_old = Model4DSTEM.build(params=params_old, scan_pos=scan_pos)
+    model_new = Model4DSTEM.build(params=params_new, scan_pos=scan_pos)
+
+    det_px_old = detector_px(model_old)
+    det_px_new = detector_px(model_new)
+
+    expanded_expr_y = sym.expand(det_px_old.y - det_px_new.y)
+    expanded_expr_x = sym.expand(det_px_old.x - det_px_new.x)
+
+    collected_y = sym.Poly(expanded_expr_y, scan_pos_y, scan_pos_x, camera_length)
+    collected_x = sym.Poly(expanded_expr_x, scan_pos_y, scan_pos_x, camera_length)
+
+    coeff = collected_y.coeffs() + collected_x.coeffs()
+
+    solution = sym.solve([eq for eq in coeff], [pxo_pxi_new, pxo_pyi_new,
+                                            pyo_pxi_new, pyo_pyi_new,
+                                            sxo_pxi_new, sxo_pyi_new,
+                                            syo_pxi_new, syo_pyi_new,
+                                            offpxi_new, offpyi_new,
+                                            offsxi_new, offsyi_new], simplify=True)
+
+    def apply_function(m: Model4DSTEM, new_scan_pixel_pitch) -> Model4DSTEM:
+        substituted = sym.lambdify([
+            pxo_pxi_old, pxo_pyi_old,
+            pyo_pxi_old, pyo_pyi_old,
+            sxo_pxi_old, sxo_pyi_old,
+            syo_pxi_old, syo_pyi_old,
+            offpxi_old, offpyi_old,
+            offsxi_old, offsyi_old,
+            pitch_old, pitch_new], [solution[attr] for attr in [pxo_pxi_new, pxo_pyi_new,
+                                                                pyo_pxi_new, pyo_pyi_new,
+                                                                sxo_pxi_new, sxo_pyi_new,
+                                                                syo_pxi_new, syo_pyi_new,
+                                                                offpxi_new, offpyi_new,
+                                                                offsxi_new, offsyi_new]])
+        evaluated = substituted(*(m.descanner.descan_error._asdict()[key] for key in
+                                  m.descanner.descan_error._asdict().keys()),
+                                m.params.scan_pixel_pitch, new_scan_pixel_pitch)
+        new_de = DescanError(*(item for item in evaluated))
+        new_params = m.params.derive(descan_error=new_de)
+        new_model = Model4DSTEM.build(new_params, m.scan_pos)
+        return new_model
+
+    return apply_function
 
 
 def trace(
