@@ -2,6 +2,7 @@ from typing import Optional, NamedTuple, Union, Any
 from numbers import Number
 from types import ModuleType
 from collections import OrderedDict
+from functools import cache
 
 import numpy.typing as npt
 import sympy as sym
@@ -86,7 +87,7 @@ def scale_rotate_flip(mat: sym.Matrix):
     #        f"Rotation angle 1 {angle1} and rotation angle 2 {angle2} are inconsistent."
     #    )
 
-    return (scale_y, angle1, flip_factor)
+    return (sym.simplify(scale_y), sym.simplify(angle1), sym.simplify(flip_factor))
 
 
 def is_sympy(expr: Any) -> bool:
@@ -806,179 +807,187 @@ class Model4DSTEM:
         assert len(run_result) == 0
         return result
 
+    @classmethod
+    @cache
+    def _mk_adjust_scan_pixel_pitch(cls):
+        """
+        This function first finds a general symbolic expression for each component of the
+        new descan error given old parameteres as symbols, then converts the sympy
+        expressions for each component into a function that allows fast numeric evaluation.
+        After that the new model is constructed.
+        """
+        (overfocus, scan_center_y,
+        scan_center_x, scan_rotation,
+        camera_length, detector_pitch,
+        detector_center_y, detector_center_x,
+        semiconv, flip_factor) = sym.symbols(r'p_overfocus p_{scancenter_y} '
+                                            r'p_{scancenter_x} p_scanrot '
+                                            r'p_camera p_detectorpitch '
+                                            r'p_{detectorcenter_y} p_{detectorcenter_x} '
+                                            r'p_semiconv p_flip', nonzero=True)
 
-def adjust_pixel_pitch_sympy(model_cls=Model4DSTEM) -> Model4DSTEM:
-    """
-    Adjust the scan pixel pitch while keeping the effective descan error
-    compensation the same.
+        (pxo_pxi_old, pxo_pyi_old,
+        pyo_pxi_old, pyo_pyi_old,
+        sxo_pxi_old, sxo_pyi_old,
+        syo_pxi_old, syo_pyi_old,
+        offpxi_old, offpyi_old,
+        offsxi_old, offsyi_old) = sym.symbols(r'pxopxi_old pxopyi_old '
+                                            r'pyopxi_old pyopyi_old '
+                                            r'sxopxi_old sxopyi_old '
+                                            r'syopxi_old syopyi_old '
+                                            r'offpxi_old offpyi_old '
+                                            r'offsxi_old offsyi_old')
+        (pxo_pxi_new, pxo_pyi_new,
+        pyo_pxi_new, pyo_pyi_new,
+        sxo_pxi_new, sxo_pyi_new,
+        syo_pxi_new, syo_pyi_new,
+        offpxi_new, offpyi_new,
+        offsxi_new, offsyi_new) = sym.symbols(r'pxopxi_new pxopyi_new '
+                                            r'pyopxi_new pyopyi_new '
+                                            r'sxopxi_new sxopyi_new '
+                                            r'syopxi_new syopyi_new '
+                                            r'offpxi_new offpyi_new '
+                                            r'offsxi_new offsyi_new')
 
-    This allows first compensating descan error and then adjusting other parameters.
+        descan_error_old = DescanError(
+            pxo_pxi=pxo_pxi_old, pxo_pyi=pxo_pyi_old,
+            pyo_pxi=pyo_pxi_old, pyo_pyi=pyo_pyi_old,
+            sxo_pxi=sxo_pxi_old, sxo_pyi=sxo_pyi_old,
+            syo_pxi=syo_pxi_old, syo_pyi=syo_pyi_old,
+            offpxi=offpxi_old, offpyi=offpyi_old,
+            offsxi=offsxi_old, offsyi=offsyi_old)
 
-    This function first finds a general symbolic expression for each component of the
-    new descan error given old parameteres as symbols, then converts the sympy
-    expressions for each component into a function that allows fast numeric evaluation.
-    After that the new model is constructed.
+        descan_error_new = DescanError(
+            pxo_pxi=pxo_pxi_new, pxo_pyi=pxo_pyi_new,
+            pyo_pxi=pyo_pxi_new, pyo_pyi=pyo_pyi_new,
+            sxo_pxi=sxo_pxi_new, sxo_pyi=sxo_pyi_new,
+            syo_pxi=syo_pxi_new, syo_pyi=syo_pyi_new,
+            offpxi=offpxi_new, offpyi=offpyi_new,
+            offsxi=offsxi_new, offsyi=offsyi_new
+        )
 
-    Use trace() to calculate detector_px() for the old and for the new parameters.
-    Then set the results equal to each other and solve the equation with respect
-    to the new descan error. For this purpose construct two expressions - for y and x
-    coordiates respectively - and apply sympy.solve().
-    Note that the equations should hold for every value of the scan position (in particular,
-    scan_pos_y scan_pos_x), and also for every value of the camera length. To implement that,
-    expand the expressions, then rearange them to be polynomials in the variables scan_pos_y,
-    scan_pos_x and camera_length, which automatically means collecting the coefficients
-    of each variable through the usage of sympy.Poly(). Finally, set the collected
-    coefficients of the polynomials to zero, which mathematically implies the desired
-    property: a polynomial is zero for all the values of its variables if and only if
-    all its coefficients equal to zero.
-    In such a way one receives equations for each of the collected coefficients, which
-    suffices to make the system solvable for all the 12 components of descan error as
-    variables.
+        pitch_old, pitch_new = sym.symbols(r'pitch_old pitch_new', nonzero=True)
 
-    The received expressions for each component of the new DescanError fully coincide
-    with the ones calculated by hand earlier.
+        params_old = Parameters4DSTEM(
+            overfocus=overfocus,
+            scan_pixel_pitch=pitch_old,
+            scan_center=PixelYX(scan_center_y, scan_center_x),
+            scan_rotation=scan_rotation,
+            camera_length=camera_length,
+            detector_pixel_pitch=detector_pitch,
+            detector_center=PixelYX(detector_center_y, detector_center_x),
+            semiconv=semiconv,  # radian
+            flip_factor=flip_factor,
+            descan_error=descan_error_old,
+            xp=np
+        )
 
-    apply_function() cconstructs a function using sympy.lambdify() that allows inserting
-    real values to each expression of the general solution and after that evaluating them
-    numerically. The lambdify() method can be supplemented with the specific
-    numerical backend by inserting e.g. "numpy", "cupy" or "jax" to the optional
-    argument "modules=" of sympy.lambdify().
-    """
-    (overfocus, scan_center_y,
-     scan_center_x, scan_rotation,
-     camera_length, detector_pitch,
-     detector_center_y, detector_center_x,
-     semiconv, flip_factor) = sym.symbols(r'p_overfocus p_{scancenter_y} '
-                                        r'p_{scancenter_x} p_scanrot '
-                                        r'p_camera p_detectorpitch '
-                                        r'p_{detectorcenter_y} p_{detectorcenter_x} '
-                                        r'p_semiconv p_flip', nonzero=True)
+        params_new = Parameters4DSTEM(
+            overfocus=overfocus,
+            scan_pixel_pitch=pitch_new,
+            scan_center=PixelYX(scan_center_y, scan_center_x),
+            scan_rotation=scan_rotation,
+            camera_length=camera_length,
+            detector_pixel_pitch=detector_pitch,
+            detector_center=PixelYX(detector_center_y, detector_center_x),
+            semiconv=semiconv,  # radian
+            flip_factor=flip_factor,
+            descan_error=descan_error_new,
+            xp=np
+        )
+        # Use trace() to calculate detector_px() for the old and for the new parameters.
+        # Then set the results equal to each other and solve the equation with respect
+        # to the new descan error. For this purpose construct two expressions - for y and x
+        # coordiates respectively - and apply sympy.solve().
+        # Note that the equations should hold for every value of the scan position (in particular,
+        # scan_pos_y scan_pos_x), and also for every value of the camera length. To implement that,
+        # expand the expressions, then rearange them to be polynomials in the variables scan_pos_y,
+        # scan_pos_x and camera_length, which automatically means collecting the coefficients
+        # of each variable through the usage of sympy.Poly(). Finally, set the collected
+        # coefficients of the polynomials to zero, which mathematically implies the desired
+        # property: a polynomial is zero for all the values of its variables if and only if
+        # all its coefficients equal to zero.
+        # In such a way one receives equations for each of the collected coefficients, which
+        # suffices to make the system solvable for all the 12 components of descan error as
+        # variables.
 
-    (pxo_pxi_old, pxo_pyi_old,
-     pyo_pxi_old, pyo_pyi_old,
-     sxo_pxi_old, sxo_pyi_old,
-     syo_pxi_old, syo_pyi_old,
-     offpxi_old, offpyi_old,
-     offsxi_old, offsyi_old) = sym.symbols(r'pxopxi_old pxopyi_old '
-                                        r'pyopxi_old pyopyi_old '
-                                        r'sxopxi_old sxopyi_old '
-                                        r'syopxi_old syopyi_old '
-                                        r'offpxi_old offpyi_old '
-                                        r'offsxi_old offsyi_old')
-    (pxo_pxi_new, pxo_pyi_new,
-     pyo_pxi_new, pyo_pyi_new,
-     sxo_pxi_new, sxo_pyi_new,
-     syo_pxi_new, syo_pyi_new,
-     offpxi_new, offpyi_new,
-     offsxi_new, offsyi_new) = sym.symbols(r'pxopxi_new pxopyi_new '
-                                        r'pyopxi_new pyopyi_new '
-                                        r'sxopxi_new sxopyi_new '
-                                        r'syopxi_new syopyi_new '
-                                        r'offpxi_new offpyi_new '
-                                        r'offsxi_new offsyi_new')
+        # The received expressions for each component of the new DescanError fully coincide
+        # with the ones calculated by hand earlier.
+        def detector_px(m: Model4DSTEM):
+            ray = m.make_source_ray(
+                source_dy=0.,
+                source_dx=0.,
+            ).ray
+            data = m.trace(ray)
+            return data['detector'].sampling['detector_px']
 
-    descan_error_old = DescanError(
-        pxo_pxi=pxo_pxi_old, pxo_pyi=pxo_pyi_old,
-        pyo_pxi=pyo_pxi_old, pyo_pyi=pyo_pyi_old,
-        sxo_pxi=sxo_pxi_old, sxo_pyi=sxo_pyi_old,
-        syo_pxi=syo_pxi_old, syo_pyi=syo_pyi_old,
-        offpxi=offpxi_old, offpyi=offpyi_old,
-        offsxi=offsxi_old, offsyi=offsyi_old)
+        scan_pos_y, scan_pos_x = sym.symbols(r'scan_{pos_y} scan_{pos_x}')
+        scan_pos = PixelYX(scan_pos_y, scan_pos_x)
 
-    descan_error_new = DescanError(
-        pxo_pxi=pxo_pxi_new, pxo_pyi=pxo_pyi_new,
-        pyo_pxi=pyo_pxi_new, pyo_pyi=pyo_pyi_new,
-        sxo_pxi=sxo_pxi_new, sxo_pyi=sxo_pyi_new,
-        syo_pxi=syo_pxi_new, syo_pyi=syo_pyi_new,
-        offpxi=offpxi_new, offpyi=offpyi_new,
-        offsxi=offsxi_new, offsyi=offsyi_new
-    )
+        model_old = cls.build(params=params_old, scan_pos=scan_pos)
+        model_new = cls.build(params=params_new, scan_pos=scan_pos)
 
-    pitch_old, pitch_new = sym.symbols(r'pitch_old pitch_new', nonzero=True)
+        det_px_old = detector_px(model_old)
+        det_px_new = detector_px(model_new)
 
-    params_old = Parameters4DSTEM(
-        overfocus=overfocus,
-        scan_pixel_pitch=pitch_old,
-        scan_center=PixelYX(scan_center_y, scan_center_x),
-        scan_rotation=scan_rotation,
-        camera_length=camera_length,
-        detector_pixel_pitch=detector_pitch,
-        detector_center=PixelYX(detector_center_y, detector_center_x),
-        semiconv=semiconv,  # radian
-        flip_factor=flip_factor,
-        descan_error=descan_error_old,
-        xp=np
-    )
+        expanded_expr_y = sym.expand(det_px_old.y - det_px_new.y)
+        expanded_expr_x = sym.expand(det_px_old.x - det_px_new.x)
 
-    params_new = Parameters4DSTEM(
-        overfocus=overfocus,
-        scan_pixel_pitch=pitch_new,
-        scan_center=PixelYX(scan_center_y, scan_center_x),
-        scan_rotation=scan_rotation,
-        camera_length=camera_length,
-        detector_pixel_pitch=detector_pitch,
-        detector_center=PixelYX(detector_center_y, detector_center_x),
-        semiconv=semiconv,  # radian
-        flip_factor=flip_factor,
-        descan_error=descan_error_new,
-        xp=np
-    )
+        collected_y = sym.Poly(expanded_expr_y, scan_pos_y, scan_pos_x, camera_length)
+        collected_x = sym.Poly(expanded_expr_x, scan_pos_y, scan_pos_x, camera_length)
 
-    def detector_px(m: Model4DSTEM):
-        ray = m.make_source_ray(
-            source_dy=0.,
-            source_dx=0.,
-        ).ray
-        data = m.trace(ray)
-        return data['detector'].sampling['detector_px']
+        coeff = collected_y.coeffs() + collected_x.coeffs()
 
-    scan_pos_y, scan_pos_x = sym.symbols(r'scan_{pos_y} scan_{pos_x}')
-    scan_pos = PixelYX(scan_pos_y, scan_pos_x)
+        solution = sym.solve([eq for eq in coeff], [pxo_pxi_new, pxo_pyi_new,
+                                                pyo_pxi_new, pyo_pyi_new,
+                                                sxo_pxi_new, sxo_pyi_new,
+                                                syo_pxi_new, syo_pyi_new,
+                                                offpxi_new, offpyi_new,
+                                                offsxi_new, offsyi_new], simplify=True)
 
-    model_old = Model4DSTEM.build(params=params_old, scan_pos=scan_pos)
-    model_new = Model4DSTEM.build(params=params_new, scan_pos=scan_pos)
+        # apply_function() constructs a function using sympy.lambdify() that allows inserting
+        # real values to each expression of the general solution and after that evaluating them
+        # numerically. The lambdify() method can be supplemented with the specific
+        # numerical backend by inserting e.g. "numpy", "cupy" or "jax" to the optional
+        # argument "modules=" of sympy.lambdify().
+        def apply_function(m: Model4DSTEM, scan_pixel_pitch) -> Model4DSTEM:
+            substituted = sym.lambdify(
+                [
+                    pxo_pxi_old, pxo_pyi_old,
+                    pyo_pxi_old, pyo_pyi_old,
+                    sxo_pxi_old, sxo_pyi_old,
+                    syo_pxi_old, syo_pyi_old,
+                    offpxi_old, offpyi_old,
+                    offsxi_old, offsyi_old,
+                    pitch_old, pitch_new
+                ], [solution[attr] for attr in [
+                    pxo_pxi_new, pxo_pyi_new,
+                    pyo_pxi_new, pyo_pyi_new,
+                    sxo_pxi_new, sxo_pyi_new,
+                    syo_pxi_new, syo_pyi_new,
+                    offpxi_new, offpyi_new,
+                    offsxi_new, offsyi_new
+                ]])
+            evaluated = substituted(
+                *m.descanner.descan_error,
+                m.params.scan_pixel_pitch, scan_pixel_pitch
+            )
+            new_de = DescanError(*evaluated)
+            new_params = m.params.derive(descan_error=new_de)
+            new_model = Model4DSTEM.build(new_params, m.scan_pos)
+            return new_model
 
-    det_px_old = detector_px(model_old)
-    det_px_new = detector_px(model_new)
+        return apply_function
 
-    expanded_expr_y = sym.expand(det_px_old.y - det_px_new.y)
-    expanded_expr_x = sym.expand(det_px_old.x - det_px_new.x)
+    def adjust_scan_pixel_pitch(self, scan_pixel_pitch: float) -> 'Model4DSTEM':
+        """
+        Adjust the scan pixel pitch while keeping the effective descan error
+        compensation the same.
 
-    collected_y = sym.Poly(expanded_expr_y, scan_pos_y, scan_pos_x, camera_length)
-    collected_x = sym.Poly(expanded_expr_x, scan_pos_y, scan_pos_x, camera_length)
-
-    coeff = collected_y.coeffs() + collected_x.coeffs()
-
-    solution = sym.solve([eq for eq in coeff], [pxo_pxi_new, pxo_pyi_new,
-                                            pyo_pxi_new, pyo_pyi_new,
-                                            sxo_pxi_new, sxo_pyi_new,
-                                            syo_pxi_new, syo_pyi_new,
-                                            offpxi_new, offpyi_new,
-                                            offsxi_new, offsyi_new], simplify=True)
-
-    def apply_function(m: Model4DSTEM, new_scan_pixel_pitch) -> Model4DSTEM:
-        substituted = sym.lambdify([
-            pxo_pxi_old, pxo_pyi_old,
-            pyo_pxi_old, pyo_pyi_old,
-            sxo_pxi_old, sxo_pyi_old,
-            syo_pxi_old, syo_pyi_old,
-            offpxi_old, offpyi_old,
-            offsxi_old, offsyi_old,
-            pitch_old, pitch_new], [solution[attr] for attr in [pxo_pxi_new, pxo_pyi_new,
-                                                                pyo_pxi_new, pyo_pyi_new,
-                                                                sxo_pxi_new, sxo_pyi_new,
-                                                                syo_pxi_new, syo_pyi_new,
-                                                                offpxi_new, offpyi_new,
-                                                                offsxi_new, offsyi_new]])
-        evaluated = substituted(*(m.descanner.descan_error._asdict()[key] for key in
-                                  m.descanner.descan_error._asdict().keys()),
-                                m.params.scan_pixel_pitch, new_scan_pixel_pitch)
-        new_de = DescanError(*(item for item in evaluated))
-        new_params = m.params.derive(descan_error=new_de)
-        new_model = Model4DSTEM.build(new_params, m.scan_pos)
-        return new_model
-
-    return apply_function
+        This allows first compensating descan error and then adjusting other parameters.
+        """
+        f = self._mk_adjust_scan_pixel_pitch()
+        return f(self, scan_pixel_pitch=scan_pixel_pitch)
 
 
 def trace(
