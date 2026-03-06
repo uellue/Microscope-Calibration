@@ -170,6 +170,40 @@ def equals(ray1: Ray, ray2: Ray) -> bool:
     return True
 
 
+def symbol_maker(params_cls, postfix, recurse_for=tuple()):
+    """
+    Declare sympy symbols for each attribute of a given parameter class.
+
+    Use __annotations__ to access the class attributes and their types.
+    Make a dictionary of sympy symbols assigned to each class attribute of
+    a primitive type. The symbol names are declared as names of the attributes
+    with an appropriate postfix. After that construct a class instance with
+    the symbolic variables as parameters.
+
+    Parameters
+    ----------
+    params_cls: class
+        class which needs symbolic variables to be assigned to its parameters
+    postfix: str
+        postfix for each symbol name to specify the parameters (e.g. 'new' or 'old')
+    recurse_for: tuple
+        list of class attributes of non-primitive types to receive symbols for each component
+
+    Returns
+    -------
+    class instance
+        instance of the class with symbols as parameters
+    """
+    symbols_dict = {}
+    for attr in params_cls.__annotations__.keys():
+        cls = params_cls.__annotations__[attr]
+        if cls in recurse_for:
+            symbols_dict[attr] = symbol_maker(cls, postfix, recurse_for)
+        else:
+            symbols_dict[attr] = sym.symbols(f"{attr}_{postfix}")
+    return params_cls(**symbols_dict)
+
+
 # TODO use LiberTEM-schema later
 @jdc.pytree_dataclass
 class Parameters4DSTEM:
@@ -575,8 +609,8 @@ class Model4DSTEM:
         return CoordXY(y=y, x=x)
 
     def real_to_scan(self, coords: CoordXY, _one: float = 1.0) -> PixelYX:
-        xp = self.xp
-        (y, x) = self._real_to_scan @ xp.array((coords.y, coords.x))
+        # xp = self.xp
+        (y, x) = self._real_to_scan @ sym.Matrix([coords.y, coords.x])
         return PixelYX(y=y + self.scan_center.y * _one, x=x + self.scan_center.x * _one)
 
     def detector_to_real(self, pixels: PixelYX, _one: float = 1.0) -> CoordXY:
@@ -590,8 +624,8 @@ class Model4DSTEM:
         return CoordXY(y=y, x=x)
 
     def real_to_detector(self, coords: CoordXY, _one: float = 1.0) -> PixelYX:
-        xp = self.xp
-        (y, x) = self._real_to_detector @ xp.array((coords.y, coords.x))
+        # xp = self.xp
+        (y, x) = self._real_to_detector @ sym.Matrix((coords.y, coords.x))
         return PixelYX(
             y=y + self.detector_center.y * _one, x=x + self.detector_center.x * _one
         )
@@ -816,85 +850,15 @@ class Model4DSTEM:
         expressions for each component into a function that allows fast numeric evaluation.
         After that the new model is constructed.
         """
-        (overfocus, scan_center_y,
-        scan_center_x, scan_rotation,
-        camera_length, detector_pitch,
-        detector_center_y, detector_center_x,
-        semiconv, flip_factor) = sym.symbols(r'p_overfocus p_{scancenter_y} '
-                                            r'p_{scancenter_x} p_scanrot '
-                                            r'p_camera p_detectorpitch '
-                                            r'p_{detectorcenter_y} p_{detectorcenter_x} '
-                                            r'p_semiconv p_flip', nonzero=True)
 
-        (pxo_pxi_old, pxo_pyi_old,
-        pyo_pxi_old, pyo_pyi_old,
-        sxo_pxi_old, sxo_pyi_old,
-        syo_pxi_old, syo_pyi_old,
-        offpxi_old, offpyi_old,
-        offsxi_old, offsyi_old) = sym.symbols(r'pxopxi_old pxopyi_old '
-                                            r'pyopxi_old pyopyi_old '
-                                            r'sxopxi_old sxopyi_old '
-                                            r'syopxi_old syopyi_old '
-                                            r'offpxi_old offpyi_old '
-                                            r'offsxi_old offsyi_old')
-        (pxo_pxi_new, pxo_pyi_new,
-        pyo_pxi_new, pyo_pyi_new,
-        sxo_pxi_new, sxo_pyi_new,
-        syo_pxi_new, syo_pyi_new,
-        offpxi_new, offpyi_new,
-        offsxi_new, offsyi_new) = sym.symbols(r'pxopxi_new pxopyi_new '
-                                            r'pyopxi_new pyopyi_new '
-                                            r'sxopxi_new sxopyi_new '
-                                            r'syopxi_new syopyi_new '
-                                            r'offpxi_new offpyi_new '
-                                            r'offsxi_new offsyi_new')
+        params_old = symbol_maker(Parameters4DSTEM, 'old', recurse_for=[DescanError, PixelYX])
+        params_new_tmp = symbol_maker(Parameters4DSTEM, 'new', recurse_for=[DescanError, PixelYX])
 
-        descan_error_old = DescanError(
-            pxo_pxi=pxo_pxi_old, pxo_pyi=pxo_pyi_old,
-            pyo_pxi=pyo_pxi_old, pyo_pyi=pyo_pyi_old,
-            sxo_pxi=sxo_pxi_old, sxo_pyi=sxo_pyi_old,
-            syo_pxi=syo_pxi_old, syo_pyi=syo_pyi_old,
-            offpxi=offpxi_old, offpyi=offpyi_old,
-            offsxi=offsxi_old, offsyi=offsyi_old)
-
-        descan_error_new = DescanError(
-            pxo_pxi=pxo_pxi_new, pxo_pyi=pxo_pyi_new,
-            pyo_pxi=pyo_pxi_new, pyo_pyi=pyo_pyi_new,
-            sxo_pxi=sxo_pxi_new, sxo_pyi=sxo_pyi_new,
-            syo_pxi=syo_pxi_new, syo_pyi=syo_pyi_new,
-            offpxi=offpxi_new, offpyi=offpyi_new,
-            offsxi=offsxi_new, offsyi=offsyi_new
+        params_new = params_old.derive(
+            descan_error=params_new_tmp.descan_error,
+            scan_pixel_pitch=params_new_tmp.scan_pixel_pitch
         )
 
-        pitch_old, pitch_new = sym.symbols(r'pitch_old pitch_new', nonzero=True)
-
-        params_old = Parameters4DSTEM(
-            overfocus=overfocus,
-            scan_pixel_pitch=pitch_old,
-            scan_center=PixelYX(scan_center_y, scan_center_x),
-            scan_rotation=scan_rotation,
-            camera_length=camera_length,
-            detector_pixel_pitch=detector_pitch,
-            detector_center=PixelYX(detector_center_y, detector_center_x),
-            semiconv=semiconv,  # radian
-            flip_factor=flip_factor,
-            descan_error=descan_error_old,
-            xp=np
-        )
-
-        params_new = Parameters4DSTEM(
-            overfocus=overfocus,
-            scan_pixel_pitch=pitch_new,
-            scan_center=PixelYX(scan_center_y, scan_center_x),
-            scan_rotation=scan_rotation,
-            camera_length=camera_length,
-            detector_pixel_pitch=detector_pitch,
-            detector_center=PixelYX(detector_center_y, detector_center_x),
-            semiconv=semiconv,  # radian
-            flip_factor=flip_factor,
-            descan_error=descan_error_new,
-            xp=np
-        )
         # Use trace() to calculate detector_px() for the old and for the new parameters.
         # Then set the results equal to each other and solve the equation with respect
         # to the new descan error. For this purpose construct two expressions - for y and x
@@ -913,6 +877,7 @@ class Model4DSTEM:
 
         # The received expressions for each component of the new DescanError fully coincide
         # with the ones calculated by hand earlier.
+
         def detector_px(m: Model4DSTEM):
             ray = m.make_source_ray(
                 source_dy=0.,
@@ -921,7 +886,7 @@ class Model4DSTEM:
             data = m.trace(ray)
             return data['detector'].sampling['detector_px']
 
-        scan_pos_y, scan_pos_x = sym.symbols(r'scan_{pos_y} scan_{pos_x}')
+        scan_pos_y, scan_pos_x = sym.symbols('scan_pos_y scan_pos_x')
         scan_pos = PixelYX(scan_pos_y, scan_pos_x)
 
         model_old = cls.build(params=params_old, scan_pos=scan_pos)
@@ -933,40 +898,27 @@ class Model4DSTEM:
         expanded_expr_y = sym.expand(det_px_old.y - det_px_new.y)
         expanded_expr_x = sym.expand(det_px_old.x - det_px_new.x)
 
-        collected_y = sym.Poly(expanded_expr_y, scan_pos_y, scan_pos_x, camera_length)
-        collected_x = sym.Poly(expanded_expr_x, scan_pos_y, scan_pos_x, camera_length)
+        collected_y = sym.Poly(expanded_expr_y, scan_pos_y, scan_pos_x, params_old.camera_length)
+        collected_x = sym.Poly(expanded_expr_x, scan_pos_y, scan_pos_x, params_old.camera_length)
 
         coeff = collected_y.coeffs() + collected_x.coeffs()
 
-        solution = sym.solve([eq for eq in coeff], [pxo_pxi_new, pxo_pyi_new,
-                                                pyo_pxi_new, pyo_pyi_new,
-                                                sxo_pxi_new, sxo_pyi_new,
-                                                syo_pxi_new, syo_pyi_new,
-                                                offpxi_new, offpyi_new,
-                                                offsxi_new, offsyi_new], simplify=True)
-
+        solution = sym.solve([eq for eq in coeff], [*params_new.descan_error],
+                            simplify=True)
         # apply_function() constructs a function using sympy.lambdify() that allows inserting
         # real values to each expression of the general solution and after that evaluating them
         # numerically. The lambdify() method can be supplemented with the specific
         # numerical backend by inserting e.g. "numpy", "cupy" or "jax" to the optional
         # argument "modules=" of sympy.lambdify().
+
         def apply_function(m: Model4DSTEM, scan_pixel_pitch) -> Model4DSTEM:
             substituted = sym.lambdify(
                 [
-                    pxo_pxi_old, pxo_pyi_old,
-                    pyo_pxi_old, pyo_pyi_old,
-                    sxo_pxi_old, sxo_pyi_old,
-                    syo_pxi_old, syo_pyi_old,
-                    offpxi_old, offpyi_old,
-                    offsxi_old, offsyi_old,
-                    pitch_old, pitch_new
+                    *params_old.descan_error,
+                    params_old.scan_pixel_pitch,
+                    params_new.scan_pixel_pitch
                 ], [solution[attr] for attr in [
-                    pxo_pxi_new, pxo_pyi_new,
-                    pyo_pxi_new, pyo_pyi_new,
-                    sxo_pxi_new, sxo_pyi_new,
-                    syo_pxi_new, syo_pyi_new,
-                    offpxi_new, offpyi_new,
-                    offsxi_new, offsyi_new
+                    *params_new.descan_error
                 ]])
             evaluated = substituted(
                 *m.descanner.descan_error,
@@ -974,7 +926,7 @@ class Model4DSTEM:
             )
             new_de = DescanError(*evaluated)
             new_params = m.params.derive(descan_error=new_de)
-            new_model = Model4DSTEM.build(new_params, m.scan_pos)
+            new_model = cls.build(new_params, m.scan_pos)
             return new_model
 
         return apply_function
