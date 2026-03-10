@@ -75,10 +75,11 @@ def scale_rotate_flip(mat: sym.Matrix):
     angle1 = sym.atan2(-rot[1, 0], rot[0, 0])
     angle2 = sym.atan2(rot[0, 1], rot[1, 1])
 
-    if sym.Or(sym.And(mat[0, 0].equals(mat[1, 1]), mat[0, 1].equals(-mat[1, 0])),
-              sym.And(mat[0, 0].equals(-mat[1, 1]), mat[0, 1].equals(mat[1, 0]))) is not sym.S.true:
+    if (sym.Or(sym.And(sympy_equals(mat[0, 0], mat[1, 1]), sympy_equals(mat[0, 1], -mat[1, 0])),
+             sym.And(sympy_equals(mat[0, 0], -mat[1, 1]), sympy_equals(mat[0, 1], mat[1, 0])))
+            is not sym.S.true):
         raise ValueError(f"y scale {scale_y} and x scale {scale_x} are different or rotation "
-                         f"angle 1 {angle1} and rotation angle 2 {angle2} are inconsistent.")
+                        f"angle 1 {angle1} and rotation angle 2 {angle2} are inconsistent.")
 
     # So far not reached in tests since inconsistencies are caught as shear before
     # if not sym.Matrix([sym.sin(angle1), sym.cos(angle1)]).equals(sym.Matrix([sym.sin(angle2),
@@ -925,7 +926,7 @@ class Model4DSTEM:
                 m.params.scan_pixel_pitch, scan_pixel_pitch
             )
             new_de = DescanError(*evaluated)
-            new_params = m.params.derive(descan_error=new_de)
+            new_params = m.params.derive(descan_error=new_de, scan_pixel_pitch=scan_pixel_pitch)
             new_model = cls.build(new_params, m.scan_pos)
             return new_model
 
@@ -940,6 +941,141 @@ class Model4DSTEM:
         """
         f = self._mk_adjust_scan_pixel_pitch()
         return f(self, scan_pixel_pitch=scan_pixel_pitch)
+
+    @classmethod
+    @cache
+    def _mk_adjust_detector_pixel_pitch(cls):
+        params_old = symbol_maker(Parameters4DSTEM, 'old', recurse_for=[DescanError, PixelYX])
+        params_new_tmp = symbol_maker(Parameters4DSTEM, 'new', recurse_for=[DescanError, PixelYX])
+
+        params_new = params_old.derive(
+            descan_error=params_new_tmp.descan_error,
+            detector_pixel_pitch=params_new_tmp.detector_pixel_pitch
+        )
+
+        def detector_px(m: Model4DSTEM):
+            ray = m.make_source_ray(
+                source_dy=0.,
+                source_dx=0.,
+            ).ray
+            data = m.trace(ray)
+            return data['detector'].sampling['detector_px']
+
+        scan_pos_y, scan_pos_x = sym.symbols('scan_pos_y scan_pos_x')
+        scan_pos = PixelYX(scan_pos_y, scan_pos_x)
+
+        model_old = cls.build(params=params_old, scan_pos=scan_pos)
+        model_new = cls.build(params=params_new, scan_pos=scan_pos)
+
+        det_px_old = detector_px(model_old)
+        det_px_new = detector_px(model_new)
+
+        expanded_expr_y = sym.expand(det_px_old.y - det_px_new.y)
+        expanded_expr_x = sym.expand(det_px_old.x - det_px_new.x)
+
+        collected_y = sym.Poly(expanded_expr_y, scan_pos_y, scan_pos_x, params_old.camera_length)
+        collected_x = sym.Poly(expanded_expr_x, scan_pos_y, scan_pos_x, params_old.camera_length)
+
+        coeff = collected_y.coeffs() + collected_x.coeffs()
+
+        solution = sym.solve([eq for eq in coeff], [*params_new.descan_error],
+                            simplify=True)
+
+        def apply_function(m: Model4DSTEM, detector_pixel_pitch) -> Model4DSTEM:
+            substituted = sym.lambdify(
+                [
+                    *params_old.descan_error,
+                    params_old.detector_pixel_pitch,
+                    params_new.detector_pixel_pitch
+                ], [solution[attr] for attr in [
+                    *params_new.descan_error
+                ]])
+            evaluated = substituted(
+                *m.descanner.descan_error,
+                m.params.detector_pixel_pitch, detector_pixel_pitch
+            )
+            new_de = DescanError(*evaluated)
+            new_params = m.params.derive(descan_error=new_de,
+                                         detector_pixel_pitch=detector_pixel_pitch)
+            new_model = cls.build(new_params, m.scan_pos)
+            return new_model
+
+        return apply_function
+
+    def adjust_detector_pixel_pitch(self, detector_pixel_pitch: float) -> 'Model4DSTEM':
+
+        f = self._mk_adjust_detector_pixel_pitch()
+        return f(self, detector_pixel_pitch=detector_pixel_pitch)
+
+    @classmethod
+    @cache
+    def _mk_adjust_scan_rotation(cls):
+        params_old = symbol_maker(Parameters4DSTEM, 'old', recurse_for=[DescanError, PixelYX])
+        params_new_tmp = symbol_maker(Parameters4DSTEM, 'new', recurse_for=[DescanError, PixelYX])
+
+        params_new = params_old.derive(
+            descan_error=params_new_tmp.descan_error,
+            scan_rotation=params_new_tmp.scan_rotation
+        )
+
+        def detector_px(m: Model4DSTEM):
+            ray = m.make_source_ray(
+                source_dy=0.,
+                source_dx=0.,
+            ).ray
+            data = m.trace(ray)
+            return data['detector'].sampling['detector_px']
+
+        scan_pos_y, scan_pos_x = sym.symbols('scan_pos_y scan_pos_x')
+        scan_pos = PixelYX(scan_pos_y, scan_pos_x)
+
+        model_old = cls.build(params=params_old, scan_pos=scan_pos)
+        model_new = cls.build(params=params_new, scan_pos=scan_pos)
+
+        det_px_old = detector_px(model_old)
+        det_px_new = detector_px(model_new)
+
+        expanded_expr_y = sym.expand(det_px_old.y - det_px_new.y)
+        expanded_expr_x = sym.expand(det_px_old.x - det_px_new.x)
+
+        collected_y = sym.Poly(expanded_expr_y, params_old.camera_length, scan_pos_y, scan_pos_x)
+        collected_x = sym.Poly(expanded_expr_x, params_old.camera_length, scan_pos_y, scan_pos_x)
+
+        coeff = collected_y.coeffs() + collected_x.coeffs()
+
+        solution = sym.solve([eq for eq in coeff], [*params_new.descan_error],
+                            simplify=True)
+
+        def apply_function(m: Model4DSTEM, scan_rotation) -> Model4DSTEM:
+            substituted = sym.lambdify(
+                [
+                    *params_old.descan_error,
+                    params_old.scan_rotation,
+                    params_new.scan_rotation
+                ], [solution[attr] for attr in [
+                    *params_new.descan_error
+                ]])
+
+            evaluated = substituted(
+                *m.descanner.descan_error,
+                float(m.params.scan_rotation), scan_rotation
+            )
+            new_de = DescanError(*evaluated)
+            new_params = m.params.derive(descan_error=new_de, scan_rotation=scan_rotation)
+            new_model = cls.build(new_params, m.scan_pos)
+            return new_model
+
+        return apply_function
+
+    def adjust_scan_rotation(self, scan_rotation: float) -> 'Model4DSTEM':
+        """
+        Adjust the scan rotation while keeping the effective descan error
+        compensation the same.
+
+        This allows first compensating descan error and then adjusting other parameters.
+        """
+        f = self._mk_adjust_scan_rotation()
+        return f(self, scan_rotation=scan_rotation)
 
 
 def trace(
