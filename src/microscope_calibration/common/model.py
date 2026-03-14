@@ -211,7 +211,7 @@ def symbol_maker(
                 (index, symbols_dict[attr]) = symbol_maker_inner(cls, postfix, recurse_for, index)
             else:
                 sym_name = attr if postfix is None else f"{attr}_{postfix}"
-                sym_name = f"{attr}_{index}"
+                sym_name = f"{sym_name}_{index}"
                 symbols_dict[attr] = sym.Symbol(sym_name)
                 index += 1
         return (index, params_cls(**symbols_dict))
