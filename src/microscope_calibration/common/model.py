@@ -1,8 +1,10 @@
-from typing import Optional, NamedTuple, Union, Any
+from typing import Optional, NamedTuple, Union, Any, TypeVar, Callable
+from collections.abc import Container
 from numbers import Number
 from types import ModuleType
 from collections import OrderedDict
 from functools import cache
+from copy import deepcopy
 
 import numpy.typing as npt
 import sympy as sym
@@ -171,7 +173,12 @@ def equals(ray1: Ray, ray2: Ray) -> bool:
     return True
 
 
-def symbol_maker(params_cls, postfix, recurse_for=tuple()):
+T = TypeVar("T")
+
+
+def symbol_maker(
+        params_cls: type[T], postfix: str | None = None,
+        recurse_for: Container = tuple()) -> T:
     """
     Declare sympy symbols for each attribute of a given parameter class.
 
@@ -195,14 +202,97 @@ def symbol_maker(params_cls, postfix, recurse_for=tuple()):
     class instance
         instance of the class with symbols as parameters
     """
-    symbols_dict = {}
-    for attr in params_cls.__annotations__.keys():
-        cls = params_cls.__annotations__[attr]
-        if cls in recurse_for:
-            symbols_dict[attr] = symbol_maker(cls, postfix, recurse_for)
-        else:
-            symbols_dict[attr] = sym.symbols(f"{attr}_{postfix}")
-    return params_cls(**symbols_dict)
+    def symbol_maker_inner(params_cls: type[T], postfix: str | None,
+            recurse_for: Container, index: int) -> tuple[int, T]:
+        symbols_dict = {}
+        for attr in params_cls.__annotations__.keys():
+            cls = params_cls.__annotations__[attr]
+            if cls in recurse_for:
+                (index, symbols_dict[attr]) = symbol_maker_inner(cls, postfix, recurse_for, index)
+            else:
+                sym_name = attr if postfix is None else f"{attr}_{postfix}"
+                sym_name = f"{attr}_{index}"
+                symbols_dict[attr] = sym.Symbol(sym_name)
+                index += 1
+        return (index, params_cls(**symbols_dict))
+
+    (_, res) = symbol_maker_inner(
+        params_cls=params_cls,
+        postfix=postfix,
+        recurse_for=recurse_for,
+        index=0
+    )
+    return res
+
+
+SymbolJaxTree = TypeVar("SymbolJaxTree")
+
+
+def lambdify(inp: SymbolJaxTree, func: Callable[[SymbolJaxTree], SymbolJaxTree], **kwargs):
+    outp = func(inp)
+    inp_leaves, inp_treedef = jax.tree.flatten(inp)
+    outp_leaves, outp_treedef = jax.tree.flatten(outp)
+
+    inp_indices = []
+    inp_symbols = []
+    inp_dups = {}
+
+    for i, leave in enumerate(inp_leaves):
+        if isinstance(leave, sym.Symbol):
+            if leave in inp_symbols:
+                inp_dups[i] = inp_symbols.index(leave)
+            else:
+                inp_indices.append(i)
+                inp_symbols.append(leave)
+        elif is_sympy(leave) and not isinstance(leave, (sym.NumberSymbol, sym.Number)):
+            raise ValueError(
+                f"SymPy leave {leave} found that is not a symbol or a constant number. "
+                "Only symbols and constants are allowed in the input definition."
+            )
+
+    outp_indices = []
+    outp_exprs = []
+
+    for i, leave in enumerate(outp_leaves):
+        if isinstance(leave, sym.Basic):
+            outp_indices.append(i)
+            outp_exprs.append(leave)
+
+    inp_indices_set = set(inp_indices)
+    inner_f = sym.lambdify(inp_symbols, outp_exprs, **kwargs)
+
+    def outer(ii):
+        ii_leaves, ii_treedef = jax.tree.flatten_with_path(ii)
+        if ii_treedef != inp_treedef:
+            raise ValueError(
+                f'Tree definition of input {ii_treedef} does not match expected '
+                f'tree definition {inp_treedef}.'
+            )
+        for i, (path, leave) in enumerate(ii_leaves):
+            if i not in inp_indices_set:
+                if i in inp_dups:
+                    orig_i = inp_dups[i]
+                    orig_path, orig_leave = ii_leaves[orig_i]
+                    if orig_leave != leave:
+                        raise ValueError(
+                            f"Input value {leave} with path {path} was a duplicate symbol in "
+                            "original input "
+                            f"but is now not matching the input value {orig_leave} at {orig_path}"
+                        )
+                elif leave != inp_leaves[i]:
+                    raise ValueError(
+                        f"Constant value {leave} doesn't match reference input "
+                        f"{inp_leaves[i]} for {path}.")
+
+        ii_vals = [ii_leaves[i][1] for i in inp_indices]
+        oo_inner = inner_f(*ii_vals)
+        outp = deepcopy(outp_leaves)
+        for i, val in enumerate(oo_inner):
+            index = outp_indices[i]
+            outp[index] = val
+        return jax.tree.unflatten(outp_treedef, outp)
+
+    return outer
 
 
 # TODO use LiberTEM-schema later
