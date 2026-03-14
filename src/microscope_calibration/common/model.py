@@ -1,4 +1,4 @@
-from typing import Optional, NamedTuple, Union, Any, TypeVar, Callable
+from typing import Optional, NamedTuple, Union, Any, TypeVar
 from collections.abc import Container
 from numbers import Number
 from types import ModuleType
@@ -241,8 +241,7 @@ def symbol_maker(
 SymbolJaxTree = TypeVar("SymbolJaxTree")
 
 
-def lambdify(inp: SymbolJaxTree, func: Callable[[SymbolJaxTree], SymbolJaxTree], **kwargs):
-    outp = func(inp)
+def lambdify(inp: SymbolJaxTree, outp: SymbolJaxTree, **kwargs):
     inp_leaves, inp_treedef = jax.tree.flatten(inp)
     outp_leaves, outp_treedef = jax.tree.flatten(outp)
 
