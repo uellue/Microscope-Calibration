@@ -204,17 +204,30 @@ def symbol_maker(
     """
     def symbol_maker_inner(params_cls: type[T], postfix: str | None,
             recurse_for: Container, index: int) -> tuple[int, T]:
-        symbols_dict = {}
-        for attr in params_cls.__annotations__.keys():
-            cls = params_cls.__annotations__[attr]
-            if cls in recurse_for:
-                (index, symbols_dict[attr]) = symbol_maker_inner(cls, postfix, recurse_for, index)
-            else:
-                sym_name = attr if postfix is None else f"{attr}_{postfix}"
-                sym_name = f"{sym_name}_{index}"
-                symbols_dict[attr] = sym.Symbol(sym_name)
-                index += 1
-        return (index, params_cls(**symbols_dict))
+        if hasattr(params_cls, '__annotations__'):
+            symbols_dict = {}
+            for attr in params_cls.__annotations__.keys():
+                cls = params_cls.__annotations__[attr]
+                if cls in recurse_for:
+                    (index, symbols_dict[attr]) = symbol_maker_inner(
+                        cls, postfix, recurse_for, index
+                    )
+                elif issubclass(cls, Number):
+                    sym_name = attr if postfix is None else f"{attr}_{postfix}"
+                    sym_name = f"{sym_name}_{index}"
+                    symbols_dict[attr] = sym.Symbol(sym_name)
+                    index += 1
+                else:
+                    raise TypeError(f"Can't generate symbol for type {cls}.")
+            return (index, params_cls(**symbols_dict))
+        elif issubclass(params_cls, Number):
+            attr = params_cls.__name__
+            sym_name = attr if postfix is None else f"{attr}_{postfix}"
+            sym_name = f"{sym_name}_{index}"
+            index += 1
+            return (index, sym.Symbol(sym_name))
+        else:
+            raise TypeError(f"Can't generate symbol for type {params_cls}.")
 
     (_, res) = symbol_maker_inner(
         params_cls=params_cls,
