@@ -17,6 +17,10 @@ from temgym_core import PixelYX
 from microscope_calibration.common.model import Model4DSTEM
 
 
+def norm(y, x):
+    return sym.sqrt(sym.Abs(y)**2 + sym.Abs(x)**2)
+
+
 def test_trace_smoke():
     model = Model4DSTEM(
         overfocus=0.7,
@@ -204,8 +208,10 @@ def test_scan(dy, dx, scan_y, scan_x):
     assert sym.sympify(res['detector'].ray.z).equals(model.overfocus + model.camera_length)
     assert sym.sympify(res['source'].ray.z).equals(0.)
     # Correct scan deflection
-    assert sym.sympify(res['specimen'].sampling['scan_px'].x).equals(scan_x + res_straight['specimen'].sampling['scan_px'].x)
-    assert sym.sympify(res['specimen'].sampling['scan_px'].y).equals(scan_y + res_straight['specimen'].sampling['scan_px'].y)
+    assert sym.sympify(res['specimen'].sampling['scan_px'].x).equals(
+        scan_x + res_straight['specimen'].sampling['scan_px'].x)
+    assert sym.sympify(res['specimen'].sampling['scan_px'].y).equals(
+        scan_y + res_straight['specimen'].sampling['scan_px'].y)
     # Check that central ray goes through scan position
     if dx == 0. and dy == 0.:
         assert sym.sympify(res['specimen'].sampling['scan_px'].x).equals(
@@ -279,8 +285,13 @@ def test_detector_coordinate_shift_scale_flip(
     # check physical coords vs pixel coords scale and shift
     assert sym.sympify(res['detector'].sampling['detector_px'].x).equals(
         res['detector'].ray.x/detector_pixel_pitch + detector_cx)
-    assert sym.sympify(res['detector'].sampling['detector_px'].y).equals(
-        flip_factor*(res['detector'].ray.y/detector_pixel_pitch + flip_factor*detector_cy))
+    assert_allclose(
+        float(sym.sympify(res['detector'].sampling['detector_px'].y).evalf()),
+        float(sym.sympify(
+            flip_factor*(
+                res['detector'].ray.y/detector_pixel_pitch + flip_factor*detector_cy)
+            ).evalf()),
+    )
     if dy == 0.:
         assert sym.sympify(res['detector'].sampling['detector_px'].y).equals(detector_cy)
     if dx == 0.:
@@ -328,8 +339,13 @@ def test_scan_coordinate_shift_scale(scan_cy, scan_cx, scan_pixel_pitch):
     # check physical coords vs pixel coords scale and shift
     assert sym.sympify(res['detector'].sampling['detector_px'].x).equals(
         res['detector'].ray.x/detector_pixel_pitch + detector_cx)
-    assert sym.sympify(res['detector'].sampling['detector_px'].y).equals(
-        flip_factor*(res['detector'].ray.y/detector_pixel_pitch + flip_factor*detector_cy))
+    assert_allclose(
+        float(sym.sympify(res['detector'].sampling['detector_px'].y).evalf()),
+        float(sym.sympify(
+            flip_factor*(
+                res['detector'].ray.y/detector_pixel_pitch + flip_factor*detector_cy)
+            ).evalf()),
+    )
 
 
 @pytest.mark.parametrize(
@@ -352,7 +368,7 @@ def test_com_validation(scan_rotation, flip_factor, detector_cy, detector_cx):
         z: float
 
         def __call__(self, ray: Ray) -> Ray:
-            distance = np.linalg.norm(np.array((ray.y, ray.x)))
+            distance = norm(ray.y, ray.x)
             if distance > 1e-6:
                 # field strength is 1/distance**2,
                 # additionally normalize displacement to unit vector
